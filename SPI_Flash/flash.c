@@ -565,7 +565,7 @@ int FlashCache_PeekBatch(char *out, uint16_t out_size, uint8_t max_cnt, uint8_t 
     *got = 0;
     if (flash_mutex) xSemaphoreTake(flash_mutex, portMAX_DELAY);
 
-    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"batch\":[");
+    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"batch\":[\n");
     if (pos >= out_size)
     {
         if (flash_mutex) xSemaphoreGive(flash_mutex);
@@ -581,10 +581,12 @@ int FlashCache_PeekBatch(char *out, uint16_t out_size, uint8_t max_cnt, uint8_t 
             continue;
         if (entry.data_len == 0 || entry.data_len > (uint16_t)(CACHE_ENTRY_SIZE - 12))
             continue;
-        if ((uint32_t)pos + entry.data_len + 4U >= out_size)
+        if ((uint32_t)pos + entry.data_len + 8U >= out_size)
             break;                                  /* 装不下就少打几条 */
 
-        if (n > 0) out[pos++] = ',';
+        if (n > 0) { out[pos++] = ','; out[pos++] = '\n'; }
+        out[pos++] = ' ';
+        out[pos++] = ' ';
         memcpy(&out[pos], entry.data, entry.data_len);
         pos += entry.data_len;
         n++;
@@ -596,6 +598,7 @@ int FlashCache_PeekBatch(char *out, uint16_t out_size, uint8_t max_cnt, uint8_t 
         return -2;                                  /* 没有可补的数据 */
     }
 
+    out[pos++] = '\n';
     out[pos++] = ']';
     out[pos++] = '}';
     out[pos]   = '\0';

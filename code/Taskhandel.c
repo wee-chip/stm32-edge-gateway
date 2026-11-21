@@ -386,7 +386,7 @@ static uint32_t last_pub_tick = 0;
                         ts[0] = '\0';      /* 未校时就不写，不谎报 2000 年 */
 
                     n = snprintf(json, sizeof(json),
-                                 "{\"temperature\":%.1f,\"shidu\":%.1f,\"light\":%.0f,\"off\":1,\"ts\":\"%s\"}",
+                                 "{\"temp\":%.1f,\"humi\":%.1f,\"light\":%.0f,\"off\":1,\"ts\":\"%s\"}",
                                  data_q.temp, data_q.shi, data_q.light, ts);
                     if (n > 0 && n < (int)sizeof(json))
                         FlashCache_Write(json, (uint16_t)n);

@@ -543,7 +543,10 @@ void MQTT_SendAllDev_NoWait(void)
             p += sprintf(payload+p,"\"temp\":%.1f,\"humi\":%.1f,",pt->val1,pt->val2);
 						UIdat.temp=pt->val1;
 						UIdat.shi=pt->val2;
-            if (pt->err_cnt == 0) _th_fresh = 1;   /* 本轮确实读到了，才允许告警判定 */
+            /* 用 g_th_ok 判断而不是 err_cnt：err_cnt 在轮询里从未被维护
+               （成功清零那行是注释状态），拿它判断会恒为真，导致传感器
+               故障时用 0 值比阈值、误报"温度过低/湿度过低"。 */
+            if (g_th_ok) _th_fresh = 1;
         }
         else if(pt->func == 0x03)
         {
