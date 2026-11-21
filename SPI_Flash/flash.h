@@ -14,12 +14,17 @@
 //设计优势：物理分区隔离，一个分区损坏不影响其他功能，符合工业设备设计规范。
 /*前4M日志区 后4M补传缓存区*/
 
-#define LOG_PART_ADDR       0x000000U  
-#define LOG_PART_SIZE       (0x400000U-1)								//日志
+/* ===== W25Q64 分区（8MB）=====
+   0x000000 ~ 0x0FFFFF   1MB    事件日志（环形，约 8192 条）
+   0x100000 ~ 0x7BFFFF   6.75MB 离线缓存（掉线期间每 10 秒一条）
+   0x7C0000 ~ 0x7FFFFF   256KB  历史记录（每 10 秒一条，与在线状态无关，约 1.9 天）
+   历史记录与离线缓存分开：前者是完整的时间序列，后者只服务断线补传。 */
+#define LOG_PART_ADDR       0x000000U
+#define LOG_PART_SIZE       (0x100000U-1)								//日志 1MB
 
 
-#define CACHE_START_ADDR    (4 * 1024 * 1024)					//补传缓冲区
-#define CACHE_END_ADDR      (8 * 1024 * 1024)
+#define CACHE_START_ADDR    (1 * 1024 * 1024)					//补传缓冲区
+#define CACHE_END_ADDR      (0x7C0000U)
 #define CACHE_SECTOR_SIZE   4096
 #define CACHE_ENTRY_SIZE    128
 
@@ -32,7 +37,21 @@
 
 /* 历史查询每页回传几条。6 条 × 约 85 字节 + 外壳 ≈ 530 字节，
    远低于 ESP-AT MQTTPUBRAW 的限制，也留足 UART 传输时间。 */
-#define CACHE_HIST_PAGE     6
+#define CACHE_HIST_PAGE     10
+
+/* ===== 历史记录区 =====
+   每条 16 字节：魔数 + Unix 时间戳 + 温度×10 + 湿度×10 + 光照 + 保留
+   256KB / 16 = 16384 条，10 秒一条 ≈ 45 小时 */
+#define HIST_START_ADDR     (0x7C0000U)
+#define HIST_END_ADDR       (0x800000U)
+#define HIST_REC_SIZE       16U
+
+void Hist_Init(void);
+void Hist_Write(uint32_t epoch, float temp, float humi, float light);
+void Hist_Reset(void);
+/* 分页读取：skip 跳过最新几条，max_cnt 最多几条。
+   输出 {"off":1,"h":[[epoch,temp,humi,light],...]}，按时间从旧到新。 */
+int  Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, uint8_t *got);
 
 #define MAGIC_VALID         0xDEADBEEF
 #define MAGIC_EMPTY         0xFFFFFFFF
@@ -99,9 +118,6 @@ int  FlashCache_Write(const char *json, uint16_t len);
 /* 批量补传：只读不消耗地打包最多 max_cnt 条成 JSON 数组；成功发布后再 Commit。
    两步分离是为了"发布失败也绝不丢数据"。 */
 int  FlashCache_PeekBatch(char *out, uint16_t out_size, uint8_t max_cnt, uint8_t *got);
-/* 云端按需拉取历史：从最新一条往前取，skip=跳过最新几条，最多取 max_cnt 条。
-   包含已补传(MAGIC_SENT)的条目 —— 补传过的数据仍然可以当历史查。 */
-int  FlashCache_PeekHistory(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, uint8_t *got);
 void FlashCache_CommitBatch(uint8_t cnt);
 int  FlashCache_HasData(void);
 

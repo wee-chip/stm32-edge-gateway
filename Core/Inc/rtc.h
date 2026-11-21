@@ -51,6 +51,8 @@ extern volatile uint8_t g_time_valid;
 void    RTC_SetDateTime(uint16_t year, uint8_t mon, uint8_t day,
                         uint8_t hour, uint8_t min, uint8_t sec, uint8_t week);
 uint8_t RTC_GetDateTimeStr(char *buf, uint16_t len);   /* 1=已校时 0=未校时 */
+/* 取 Unix 时间戳（秒）。返回 1 = 已校时，0 = 时间不可信（此时 *epoch 不写）。 */
+uint8_t RTC_GetEpoch(uint32_t *epoch);
 
 /* USER CODE END Prototypes */
 

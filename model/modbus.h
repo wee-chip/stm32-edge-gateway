@@ -34,6 +34,14 @@ typedef struct
     float    val2;       //数据2
 }ModDev_t;
 
+/* ===== 阈值告警 =====
+   温度/湿度越界时在实时报文里置 alm 位，云端据此告警。
+   位定义：bit0 温度过高 / bit1 温度过低 / bit2 湿度过高 / bit3 湿度过低 */
+#define ALM_TEMP_HIGH   35.0f
+#define ALM_TEMP_LOW     5.0f
+#define ALM_HUMI_HIGH   80.0f
+#define ALM_HUMI_LOW    20.0f
+
 extern ModDev_t dev_list[];
 extern uint8_t dev_cnt;
 

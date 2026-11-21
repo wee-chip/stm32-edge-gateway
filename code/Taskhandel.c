@@ -151,6 +151,7 @@ static void CloudCmd_Handle(void)
     if (strstr(g_cmd_payload, "clearcache") != NULL)
     {
         FlashCache_Reset();
+        Hist_Reset();
         Log_Write(LOG_INFO, "cache cleared");
         return;
     }
@@ -195,7 +196,7 @@ static void CloudCmd_SendPage(void)
     if (left == 0) { s_hist_active = 0; return; }
     if (left > CACHE_HIST_PAGE) left = CACHE_HIST_PAGE;
 
-    if (FlashCache_PeekHistory(buf, sizeof(buf), s_hist_skip, (uint8_t)left, &got) != 0 || got == 0)
+    if (Hist_PeekPage(buf, sizeof(buf), s_hist_skip, (uint8_t)left, &got) != 0 || got == 0)
     {
         s_hist_active = 0;
         Log_Write(LOG_INFO, "hist none");     /* 没有更多历史了 */

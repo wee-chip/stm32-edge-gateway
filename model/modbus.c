@@ -490,6 +490,20 @@ void Modbus_Upload_Json(void)
         }
     }
     xQueueOverwrite(data_queue, &uidata);
+
+    /* 历史记录：每 10 秒一条，与在线/离线无关，是完整时间序列。
+       未校时（epoch 拿不到真实时间）不写，宁可缺一条也不写错时间。 */
+    {
+        static uint32_t last_hist = 0;
+        uint32_t now = HAL_GetTick();
+        uint32_t ep  = 0;
+
+        if ((now - last_hist) >= 10000u && RTC_GetEpoch(&ep) && ep != 0)
+        {
+            last_hist = now;
+            Hist_Write(ep, uidata.temp, uidata.shi, uidata.light);
+        }
+    }
 }
 
 
@@ -535,6 +549,16 @@ void MQTT_SendAllDev_NoWait(void)
        age 归零   = 刚刚真正读到。
        inv = 485 当前方向极性（0 标准 / 1 反相），烧不同接法的模块时一眼能看出来。
        注意：th 的值必须带引号（合法 JSON 字符串），否则整条 JSON 解析失败被巴法云丢弃 */
+    /* 告警位：bit0 温度高 / bit1 温度低 / bit2 湿度高 / bit3 湿度低 */
+    {
+        uint8_t alm = 0;
+        if (UIdat.temp > ALM_TEMP_HIGH) alm |= 0x01;
+        if (UIdat.temp < ALM_TEMP_LOW)  alm |= 0x02;
+        if (UIdat.shi  > ALM_HUMI_HIGH) alm |= 0x04;
+        if (UIdat.shi  < ALM_HUMI_LOW)  alm |= 0x08;
+        p += sprintf(payload + p, "\"alm\":%u,", (unsigned)alm);
+    }
+
     p += sprintf(payload+p,"\"th\":\"%s\",\"rx\":%u,\"rxl\":%u,\"ok\":%u,\"age\":%u,\"inv\":%u,\"txf\":%u,\"lp\":%u,\"lr\":%u}",
                  g_th_ok ? "OK" : "FAIL", (unsigned)g_rx_count, (unsigned)g_rx_light,
                  (unsigned)g_ok_count,

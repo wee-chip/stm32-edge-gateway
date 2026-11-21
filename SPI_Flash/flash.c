@@ -302,6 +302,8 @@ void FlashCache_Init(void)
             read_addr = CACHE_START_ADDR;
     }
     initialized = 1;
+
+    Hist_Init();
 }
 
 // 写入
@@ -372,6 +374,164 @@ void FlashCache_Reset(void)
 
     if (flash_mutex) xSemaphoreGive(flash_mutex);
 }
+
+/* ================= 历史记录区（0x7C0000 起 256KB）=================
+   与离线缓存分开：离线缓存只在断线时写、且补传后会清；历史记录无论在线离线
+   每 10 秒写一条，是完整时间序列，供云端按需查询。
+   每条 16 字节，16384 条，10 秒一条约 45 小时，写满后环形覆盖。 */
+#define HIST_MAGIC  0x48495354U      /* "HIST" */
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t epoch;      /* Unix 秒 */
+    int16_t  temp10;     /* 温度 x10 */
+    uint16_t humi10;     /* 湿度 x10 */
+    uint16_t light;
+    uint16_t rsv;
+} HistRec_t;
+
+static uint32_t hist_wr    = HIST_START_ADDR;
+static uint8_t  hist_ready = 0;
+
+void Hist_Init(void)
+{
+    HistRec_t r;
+    uint32_t addr = HIST_START_ADDR;
+
+    /* 与日志一致：从分区头扫描到最后一条有效记录，续写其后 */
+    while (addr + HIST_REC_SIZE <= HIST_END_ADDR)
+    {
+        SPI_FLASH_BufferRead((uint8_t *)&r, addr, HIST_REC_SIZE);
+        if (r.magic != HIST_MAGIC)
+            break;
+        addr += HIST_REC_SIZE;
+    }
+
+    if (addr + HIST_REC_SIZE > HIST_END_ADDR)
+        addr = HIST_START_ADDR;      /* 写满则回绕 */
+
+    hist_wr    = addr;
+    hist_ready = 1;
+}
+
+void Hist_Reset(void)
+{
+    if (!hist_ready) return;
+    if (flash_mutex) xSemaphoreTake(flash_mutex, portMAX_DELAY);
+    hist_wr = HIST_START_ADDR;
+    SPI_FLASH_SectorErase(HIST_START_ADDR);
+    SPI_FLASH_WaitForWriteEnd();
+    if (flash_mutex) xSemaphoreGive(flash_mutex);
+}
+
+void Hist_Write(uint32_t epoch, float temp, float humi, float light)
+{
+    HistRec_t r;
+
+    if (!hist_ready || epoch == 0)
+        return;
+
+    if (flash_mutex) xSemaphoreTake(flash_mutex, portMAX_DELAY);
+
+    if (hist_wr + HIST_REC_SIZE > HIST_END_ADDR)
+        hist_wr = HIST_START_ADDR;
+
+    /* 跨扇区先擦（NOR 写前擦） */
+    if (hist_wr % CACHE_SECTOR_SIZE == 0)
+    {
+        SPI_FLASH_SectorErase(hist_wr);
+        SPI_FLASH_WaitForWriteEnd();
+    }
+
+    memset(&r, 0xFF, sizeof(r));
+    r.magic  = HIST_MAGIC;
+    r.epoch  = epoch;
+    r.temp10 = (int16_t)(temp * 10.0f);
+    r.humi10 = (uint16_t)(humi * 10.0f);
+    r.light  = (uint16_t)((light > 65535.0f) ? 65535.0f : light);
+
+    SPI_FLASH_BufferWrite((uint8_t *)&r, hist_wr, HIST_REC_SIZE);
+    hist_wr += HIST_REC_SIZE;
+
+    if (flash_mutex) xSemaphoreGive(flash_mutex);
+}
+
+int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, uint8_t *got)
+{
+    uint32_t addr_list[16];
+    HistRec_t r;
+    uint32_t addr;
+    uint16_t pos;
+    uint8_t  n = 0, i, first = 1;
+
+    if (!hist_ready || out == NULL || got == NULL || max_cnt == 0)
+        return -1;
+
+    *got = 0;
+    if (max_cnt > 16) max_cnt = 16;
+
+    if (flash_mutex) xSemaphoreTake(flash_mutex, portMAX_DELAY);
+
+    /* 从写指针往前倒找，遇到擦除态即到头 */
+    addr = hist_wr;
+    while (addr >= HIST_START_ADDR + HIST_REC_SIZE && n < max_cnt)
+    {
+        addr -= HIST_REC_SIZE;
+        SPI_FLASH_BufferRead((uint8_t *)&r, addr, HIST_REC_SIZE);
+        if (r.magic != HIST_MAGIC)
+            break;
+        if (skip > 0) { skip--; continue; }
+        addr_list[n++] = addr;
+    }
+
+    if (n == 0)
+    {
+        if (flash_mutex) xSemaphoreGive(flash_mutex);
+        return -2;
+    }
+
+    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"h\":[");
+    if (pos >= out_size)
+    {
+        if (flash_mutex) xSemaphoreGive(flash_mutex);
+        return -1;
+    }
+
+    /* addr_list 是新->旧，输出旧->新 */
+    for (i = n; i > 0; i--)
+    {
+        int ti, tf, hi, hf;
+
+        SPI_FLASH_BufferRead((uint8_t *)&r, addr_list[i - 1], HIST_REC_SIZE);
+        if ((uint32_t)pos + 48U >= out_size)
+            break;
+
+        ti = r.temp10 / 10;  tf = r.temp10 % 10;  if (tf < 0) tf = -tf;
+        hi = r.humi10 / 10;  hf = r.humi10 % 10;
+
+        pos += (uint16_t)snprintf(out + pos, out_size - pos, "%s[%lu,%d.%d,%d.%d,%u]",
+                                  first ? "" : ",",
+                                  (unsigned long)r.epoch,
+                                  ti, tf, hi, hf, (unsigned)r.light);
+        first = 0;
+        (*got)++;
+    }
+
+    if (*got == 0)
+    {
+        if (flash_mutex) xSemaphoreGive(flash_mutex);
+        return -2;
+    }
+
+    out[pos++] = ']';
+    out[pos++] = '}';
+    out[pos]   = '\0';
+
+    if (flash_mutex) xSemaphoreGive(flash_mutex);
+    return 0;
+}
+
 
 
 // 清空
@@ -485,90 +645,6 @@ void FlashCache_CommitBatch(uint8_t cnt)
     if (flash_mutex) xSemaphoreGive(flash_mutex);
 }
 
-/* ================= 云端按需拉取历史（2026-11-21）=================
-   与"自动补传"的区别：补传是设备主动推、占推送配额；这里是云端先问、设备才答，
-   用户查一次就发一页，不查就一个字节都不发。
-   数据来源用同一块缓存分区（含已补传的 MAGIC_SENT 条目），所以补传过的历史
-   依然能被查到，不需要额外分区。
-
-   out 形如：{"off":1,"h":[{...},{...}]}   （数组内按时间从旧到新）
-   skip    跳过最新的 skip 条（翻页用）
-   max_cnt 本页最多几条（调用方传 CACHE_HIST_PAGE）
-   got     实际取到几条；返回 -2 = 没有更多历史 */
-int FlashCache_PeekHistory(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, uint8_t *got)
-{
-    uint32_t addr_list[8];
-    uint32_t addr;
-    uint16_t pos;
-    uint8_t  n = 0, i;
-    CacheEntry_t entry;
-
-    if (!initialized || out == NULL || got == NULL || max_cnt == 0)
-        return -1;
-
-    *got = 0;
-    if (max_cnt > 8) max_cnt = 8;          /* addr_list 的容量 */
-
-    if (flash_mutex) xSemaphoreTake(flash_mutex, portMAX_DELAY);
-
-    /* 从写指针往前倒着找：跳过空洞/坏条目直接停（那条边界之外不会有有效数据） */
-    addr = write_addr;
-    while (addr >= CACHE_START_ADDR + sizeof(CacheEntry_t) && n < max_cnt)
-    {
-        addr -= sizeof(CacheEntry_t);
-        SPI_FLASH_BufferRead((uint8_t *)&entry, addr, sizeof(CacheEntry_t));
-
-        if (entry.magic != MAGIC_VALID && entry.magic != MAGIC_SENT)
-            break;                          /* 到头了（擦除态 = 已写区域的下界） */
-        if (entry.data_len == 0 || entry.data_len > (uint16_t)(CACHE_ENTRY_SIZE - 12))
-            continue;
-
-        if (skip > 0) { skip--; continue; }  /* 翻页：跳过更新的那几条 */
-        addr_list[n++] = addr;
-    }
-
-    if (n == 0)
-    {
-        if (flash_mutex) xSemaphoreGive(flash_mutex);
-        return -2;
-    }
-
-    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"h\":[");
-    if (pos >= out_size)
-    {
-        if (flash_mutex) xSemaphoreGive(flash_mutex);
-        return -1;
-    }
-
-    /* addr_list 是"新→旧"，输出要"旧→新"，所以倒着遍历 */
-    {
-    uint8_t first = 1;
-    for (i = n; i > 0; i--)
-    {
-        SPI_FLASH_BufferRead((uint8_t *)&entry, addr_list[i - 1], sizeof(CacheEntry_t));
-        if ((uint32_t)pos + entry.data_len + 4U >= out_size)
-            break;
-        if (!first) out[pos++] = ',';        /* 第一条不加逗号 */
-        first = 0;
-        memcpy(&out[pos], entry.data, entry.data_len);
-        pos += entry.data_len;
-        (*got)++;
-    }
-    }
-
-    if (*got == 0)
-    {
-        if (flash_mutex) xSemaphoreGive(flash_mutex);
-        return -2;
-    }
-
-    out[pos++] = ']';
-    out[pos++] = '}';
-    out[pos]   = '\0';
-
-    if (flash_mutex) xSemaphoreGive(flash_mutex);
-    return 0;
-}
 
 /*从读指针位置读一条缓存数据*/
                 

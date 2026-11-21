@@ -204,4 +204,31 @@ uint8_t RTC_GetDateTimeStr(char *buf, uint16_t len)
     return g_time_valid;
 }
 
+/* Unix 时间戳。历史记录区存 16 字节定长记录，时间用 epoch 数字比字符串省一半。 */
+uint8_t RTC_GetEpoch(uint32_t *epoch)
+{
+    RTC_TimeTypeDef t;
+    RTC_DateTypeDef d;
+    int y, era, yoe, doy, doe;
+
+    if (epoch == NULL) return 0;
+
+    HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+
+    y = 2000 + (int)d.Year;
+
+    /* days from civil（Howard Hinnant 算法），返回 1970-01-01 起的天数 */
+    y -= (d.Month <= 2);
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (d.Month + (d.Month > 2 ? -3 : 9)) + 2) / 5 + d.Date - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+
+    *epoch = (uint32_t)((era * 146097 + doe - 719468) * 86400
+                        + t.Hours * 3600 + t.Minutes * 60 + t.Seconds);
+
+    return g_time_valid;
+}
+
 /* USER CODE END 1 */
