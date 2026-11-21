@@ -171,7 +171,8 @@ volatile uint8_t g_echo_cnt = 0xFF;   /* 最后一次发送的回显字节数：
 
 };
 uint8_t dev_cnt = sizeof(dev_list)/sizeof(ModDev_t);
-#define MAX_ERR_CNT 5   //连续失败5次临时跳过该设备
+/* err_cnt 只做诊断计数（云端 probe 里可见），不用于跳过设备：
+   一旦按失败次数跳过，设备恢复后也不会再被轮询，等于永久放弃。 */
 
 
 
@@ -412,12 +413,6 @@ void Modbus_Poll_AllDev(void)
     {
         ModDev_t *p = &dev_list[i];
 			 memset(tmp_buf, 0, sizeof(tmp_buf)); // 新增：每次读取前清空缓存
-        //连续错误超限，跳过本次轮询
-//        if(p->err_cnt >= MAX_ERR_CNT)
-//        {
-//            continue;
-//        }
-
         //发起读取
         uint8_t ok = Modbus_Read_Dev(p->dev_addr,p->func,p->reg_start,p->reg_num,tmp_buf);
 
@@ -442,7 +437,7 @@ void Modbus_Poll_AllDev(void)
 
         if(ok == 1)
         {
-         //   p->err_cnt = 0; //成功清零错误计数
+            p->err_cnt = 0;                 /* 读到即清零连续失败计数 */
             //根据从机地址解析数据
             switch(p->func)
             {
@@ -478,6 +473,9 @@ void Modbus_Poll_AllDev(void)
         {
             /* 温湿度读取失败时立刻把在线标志清零，
                否则传感器掉线后云端仍一直上报 "th":"OK"（诊断字段失真） */
+            if(p->err_cnt < 0xFFFFu)
+                p->err_cnt++;               /* 仅作诊断计数，不参与跳过逻辑 */
+
             if(p->func == 0x04)
             {
                 g_th_ok = 0;
@@ -543,9 +541,8 @@ void MQTT_SendAllDev_NoWait(void)
             p += sprintf(payload+p,"\"temp\":%.1f,\"humi\":%.1f,",pt->val1,pt->val2);
 						UIdat.temp=pt->val1;
 						UIdat.shi=pt->val2;
-            /* 用 g_th_ok 判断而不是 err_cnt：err_cnt 在轮询里从未被维护
-               （成功清零那行是注释状态），拿它判断会恒为真，导致传感器
-               故障时用 0 值比阈值、误报"温度过低/湿度过低"。 */
+            /* 用 g_th_ok 判断本轮是否真读到：它是轮询里维护的在线标志，
+               比 err_cnt 更直接（后者只用于诊断计数）。 */
             if (g_th_ok) _th_fresh = 1;
         }
         else if(pt->func == 0x03)
