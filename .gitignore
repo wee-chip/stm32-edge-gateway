@@ -1,0 +1,38 @@
+# ---- 构建产物（Keil）----
+MDK-ARM/F4project/
+*.o
+*.d
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.crf
+*.dep
+*.lnp
+*.htm
+*.iex
+*.sct
+MDK-ARM/build_*.log
+MDK-ARM/DebugConfig/
+RTE/_*/
+
+# ---- IDE 本地配置 ----
+*.uvguix.*
+*.uvoptx
+*.scvd
+.vscode/
+.idea/
+
+# ---- 个人备份与临时文件 ----
+backup_before_fullfix_*/
+*.bak
+*.bak2
+*.bak-*
+*.orig
+_probe/
+
+# ---- 系统文件 ----
+Thumbs.db
+desktop.ini
+.DS_Store
