@@ -13,7 +13,7 @@ MDK-ARM/F4project/
 *.htm
 *.iex
 *.sct
-MDK-ARM/build_*.log
+*.log
 MDK-ARM/DebugConfig/
 RTE/_*/
 
