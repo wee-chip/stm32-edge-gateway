@@ -53,11 +53,8 @@ static ESP_Status_t ESP_JoinWiFi(void)
     /* 由热点 DHCP 分配 IP、网关和 DNS；忽略不支持该命令的旧 AT 固件返回值。 */
     ESP_SendCmd_OK("AT+CWDHCP=1,1\r\n", 2000);
 
-    /* 先查是不是已经连着这个热点。
-       模块 flash 里存过 AP 时可能已自连完成，这时再发 AT+CWJAP 不会再打印
-       WIFI CONNECTED / WIFI GOT IP，只回一个 OK —— 而下面只等 "WIFI GOT IP"
-       会白等 15 秒判失败。现象就是：手机热点上明明显示 ESP 已连接，
-       固件却认为 WiFi 没连上、根本不去连 MQTT。 */
+    /* 先查是否已连上：模块存过 AP 时会自连，此时再发 CWJAP 只回 OK、不打印
+   WIFI GOT IP，等它就白等 15 秒。 */
     if (ESP_SendCmd("AT+CWJAP?\r\n", WIFI_SSID, 2000) == ESP_OK)
         return ESP_OK;
 
@@ -87,13 +84,8 @@ void ESP_HardReset(void)
 	vTaskDelay(pdMS_TO_TICKS(500));
 }
 
-/* ================= MQTT 连接参数与遗嘱 =================
-   ESP-AT 的 AT+MQTTCONNCFG 必须在 AT+MQTTUSERCFG 之后、AT+MQTTCONN 之前下发。
-   官方语法：
-     AT+MQTTCONNCFG=<LinkID>,<keepalive>,<disable_clean_session>,
-                    <lwt_topic>,<lwt_msg>,<lwt_qos>,<lwt_retain>
-   注意 disable_clean_session 是反的：0 = 使能清理会话，1 = 禁用。
-   这里传 0，与改动前的默认行为一致（每次重连都重新订阅）。 */
+/* 连接参数：AT+MQTTCONNCFG 须在 USERCFG 之后、MQTTCONN 之前下发；
+   disable_clean_session 语义相反，0 = 使能清理会话。 */
 
 #if BEMFA_WILL_ENABLE
 static ESP_Status_t ESP_MQTT_SetWill(uint8_t enable)
@@ -121,11 +113,8 @@ static ESP_Status_t ESP_MQTT_ConnRaw(void)
     if (st == ESP_OK)
         return ESP_OK;
 
-    /* ⚠ 只有"被明确判错"才重试 —— busy p... / ERROR / ERR CODE 表示命令根本没被执行。
-       超时（ESP_TIMEOUT）绝不能重试：那说明命令可能已经执行成功、只是 +MQTTCONNECTED
-       被别的 URC 冲掉了。再发一次会收到 ALREADY CONNECTED 的 ERROR，
-       于是"其实已经连上"被判成"连不上"，g_mqtt_connected 一直是 0 ——
-       现象就是巴法云显示在线、板子却一条数据都不发。 */
+    /* 只有被明确判错（busy/ERROR）才重试。超时不能重试：命令可能已成功，
+   再发会收到 ALREADY CONNECTED 的 ERROR。 */
     if (st != ESP_ERROR)
         return st;
 
@@ -207,11 +196,7 @@ static ESP_Status_t ESP_MQTT_Connect(void)
    避免在不支持的固件上每条消息白等 3 秒。 */
 static uint8_t s_raw_miss = 0;
 
-/* 本次发布若在 MQTTPUBRAW 阶段失败，记下那时的阶段码。
-   字符串兜底会重置 g_pub_stage，不单独存一份就看不到原始原因。
-   （原 PubFailLog 的逐条失败日志已于 2026-11-19 22:35 撤掉：
-     故障已定位，逐条打印只会把日志页塞满，日志留给"发生了什么"，
-     不再记录"每一帧死在哪"。需要细查时把 g_pub_stage 打进 probe JSON 即可。） */
+/* PUBRAW 阶段的失败码（字符串兜底会覆盖 g_pub_stage，故单独保留一份）。 */
 static uint8_t s_raw_stage = 0;
 
 ESP_Status_t MQTT_Publish(const char *json, uint32_t timeout_ms)
@@ -245,13 +230,8 @@ ESP_Status_t MQTT_Publish(const char *json, uint32_t timeout_ms)
             s_raw_miss++;
     }
 
-    /* ---- 兜底：AT+MQTTPUB 字符串形式 ----
-       必须把 " 和 \ 都转义，因为 AT 解析器靠引号切分参数。
-
-       ⚠ 2026-11-21：这条路有两条硬限制 —— esc[300] 缓冲区，以及
-       ESP-AT 单条命令 < 256 字节。批量补传的数组可能有 300~400 字节，
-       硬塞进来会被**静默截断**，发上去就是半截 JSON，比不发更糟。
-       所以超过 200 字节直接判失败，绝不硬塞。 */
+    /* 兜底：AT+MQTTPUB 字符串形式，需转义引号。该路径受 esc[300] 与 AT 单命令
+   256 字节限制，超长直接判失败，避免被静默截断。 */
     if (strlen(json) > 200)
         return ESP_ERROR;
 
@@ -269,24 +249,8 @@ ESP_Status_t MQTT_Publish(const char *json, uint32_t timeout_ms)
     return ESP_MQTTPub(pub, timeout_ms);
 }
 
-/* 上报一次诊断快照（云端可见，不写本地 Flash）。
-   首次连接成功后发一次；每次重连成功后再发一次 —— 这样即使实时数据发不出去，
-   云端也能从这条 probe 看出板子卡在哪一步：
-     tx 不涨        → MQTT 任务根本没进发送路径（g_mqtt_connected=0，或 data_queue 一直空）
-     tx 涨、pf 也涨 → 进了发送路径但 broker 不收
-     lk 涨          → MQTT 任务卡在串口锁上取不到
-     up 变小        → 板子重启过（看是不是看门狗复位循环） */
-/* 把 probe 命令拼出来。长度预算：ESP8266 AT 固件单条命令上限 256 字节
-   （官方 ESP-AT 文档），这里压在 140 字节以内。
-   字段名的含义：
-     th  = 温湿度最近一次读取结果 OK/FAIL，两个原值（÷10 得实际值）
-     rx  = 最后一帧 Modbus 收到几个字节（0 = 485 上一个字节都没回来）
-     ok/er = 累计成功/失败帧数
-     t   = 开机秒数
-     p   = 连续发布失败计数（>0 说明 AT+MQTTPUB 被拒）
-     l   = MQTT 任务取串口锁失败次数
-     u   = 进入实时发送分支的次数（不涨 = 任务根本没走到发布）
-     tf  = 任务创建失败位图（0 = 五个任务都建成功） */
+/* 诊断快照：开机与每次重连后各发一次，云端可见，不写本地 Flash。 */
+/* 任务创建失败位图（freertos.c 置位）：1 UI / 2 Modbus / 4 AT / 8 MQTT / 16 Dog。 */
 static void MQTT_ProbeBuild(char *pmsg, size_t n)
 {
     extern volatile uint8_t  g_th_ok;
@@ -328,12 +292,7 @@ static void QuickBlink(uint8_t n)
     }
 }
 
-/* 开机 / 重连时用：带等待 + 重试，成功不闪，最终失败快闪 3 下。
-   必须自己取串口锁：MQTT_Init 跑在 AT 任务里，而 g_mqtt_connected 已经置 1，
-   MQTT 发布任务此刻可能正在发实时数据。两个任务都不持锁去操作 UART1，
-   ESP_SendCmd 开头的清缓冲区会把对方的应答清掉，双方一起超时。
-   ⚠ 闪码约定：这里闪 3 下 = 「MQTT 已连接，但 AT+MQTTPUB 发不出去」。
-      和 11/21/9/22 这些"连不上"的码区分开，方便一眼定位。 */
+/* 开机/重连时发送 probe，带重试与失败闪灯；调用方须持有 uart1_mutex。 */
 ESP_Status_t MQTT_SendProbe(void)
 {
     char json[256];
@@ -366,14 +325,7 @@ ESP_Status_t MQTT_SendProbe(void)
     return ESP_ERROR;
 }
 
-/* 运行期遥测：由 AT 任务每 30 秒调一次。
-   屏幕已经坏了，这是唯一能在不改硬件的前提下"看见"板子内部状态的通道 ——
-   probe 这条链路已被实测证明能到达巴法云（开机那条就是它）。
-   有了 u/p/l 三个计数，就能区分到底卡在哪一环：
-     u 不涨        → MQTT 任务没走到发布分支（g_mqtt_connected=0 或队列空）
-     u 涨、p 涨    → 走到了发布，但 AT+MQTTPUB 被固件拒（busy p / ERR CODE）
-     u 涨、p 不涨  → 发布成功但云端看不到 → 问题在 broker 侧（主题/互踢/限流）
-     l 涨          → 卡在串口锁上，AT 任务与 MQTT 任务在互相抢 */
+/* 运行期遥测：由 AT 任务周期调用，上报发送侧计数。 */
 void MQTT_SendTelemetry(void)
 {
     char json[256];
@@ -504,11 +456,7 @@ static void MQTT_DiagAfterConn(void)
     if (MQTT_SendProbe() == ESP_OK)
         return;
 
-    /* 只留一行：原始阶段/兜底阶段 + 断连次数。
-       阶段码含义见 ESP_at.h 的 g_pub_stage；
-       d = 上电以来 +MQTTDISCONNECTED 的次数，涨说明链路是被断掉的。
-       原来还有第二次 AT+CIFSR / AT+MQTTCONN? 查询和单独一行 ip/wifi/mq 日志，
-       故障已定位，逐字段记录只会把日志页塞满，已撤掉。 */
+    /* probe 失败只记一行：阶段码 + 断连次数。 */
     char d[64];
     snprintf(d, sizeof(d), "probe FAIL st=%u/%u d=%u",
              (unsigned)s_raw_stage, (unsigned)g_pub_stage, (unsigned)g_disc_cnt);
@@ -672,21 +620,7 @@ static uint8_t MQTT_SoftConn(void)
     return 1;
 }
 
-/* ================= 重连（分级）=================
-   ⚠ 2026-11-19 根因修复：这里原来是无条件 ESP_HardReset()。
 
-   为什么这是根因：
-     模块被硬复位时，它的 TCP 不会发 FIN。broker 那侧的会话就成了"僵尸"，
-     要等 keepalive 超时（我们设的 120s，broker 按 1.5 倍算 180s）才回收。
-     而硬复位后 2 秒我们就用**同一个 ClientID**（方式一：私钥即 ClientID）重新
-     CONNECT —— 几秒内撞上自己的僵尸会话。巴法云的表现就是：
-     先把新连接显示为在线，随后把这条连接关掉；板子收到 +MQTTDISCONNECTED，
-     判离线，又硬复位，又连…… 于是"巴法云只在线几秒、不断重连、probe 永远 FAIL"。
-
-   修法：能软重连就绝不复位
-     0 级  AT 探活 → WiFi 还在 → 只重连 MQTT（约 2 秒，不复位）
-     1 级  模块不回 AT / WiFi 已掉 / 软重连失败 → 硬复位 + 重新配网
-   软重连让模块自己正常关闭 TCP，broker 立刻释放会话，僵尸不会产生。 */
 /* ================= WiFi 层两个工具函数 =================
    为什么必须单独抽出来：AT+CWJAP? 回 +CWJAP: 只能证明 802.11 关联成立，
    证明不了 DHCP 成功。关联上了但没有 IP，MQTT 一样连不出去，
@@ -734,27 +668,13 @@ static uint8_t WiFi_Rejoin(void)
     return WiFi_HasIp();     /* 关联成功还不够，必须真的有 IP */
 }
 
-/* ================= 重连（分级）=================
-   ⚠ 2026-11-19 根因修复：这里原来是无条件 ESP_HardReset()。
+/* 重连分级：
+     0   级  WiFi 在且有 IP        → 只重连 MQTT
+     0.5 级  WiFi 掉或无 IP        → 重新配网，不复位
+     1   级  AT 无响应或软路径连续失败 → 硬复位兜底
+   原则：能不复位就不复位。硬复位不发 FIN，broker 侧会话要等 keepalive 超时才回收，
+   新连接用同一 ClientID 会撞上自己的残留会话而被踢下线。 */
 
-   为什么这是根因：
-     模块被硬复位时，它的 TCP 不会发 FIN。broker 那侧的会话就成了"僵尸"，
-     要等 keepalive 超时（我们设的 120s，broker 按 1.5 倍算 180s）才回收。
-     而硬复位后 2 秒我们就用**同一个 ClientID**（方式一：私钥即 ClientID）重新
-     CONNECT —— 几秒内撞上自己的僵尸会话。巴法云的表现就是：
-     先把新连接显示为在线，随后把这条连接关掉；板子收到 +MQTTDISCONNECTED，
-     判离线，又硬复位，又连…… 于是"巴法云只在线几秒、不断重连、probe 永远 FAIL"。
-
-   修法：能不复位就绝不复位。模块还在，就让它自己正常关闭旧 TCP（发 FIN），
-   broker 立刻释放会话，僵尸不会产生。
-
-   0   级  AT 活着 + WiFi 关联着 + 真有 IP  → 只重连 MQTT（约 2 秒）
-   0.5 级  AT 活着 + WiFi 掉了 / 没 IP     → 重新配网（CWQAP→CWJAP），仍不复位
-   1   级  AT 不回应 / 连续 2 次软路径失败 → 硬复位 + 重新配网（最后手段）
-
-   为什么要"连续 2 次失败就升级"：
-     模块"半死"时（状态机残留、卡在旧连接上）软路径会永远打转，2 秒一次、
-     永远恢复不了。连续失败说明残留状态已经不可信，必须硬清一次。 */
 
 #define SOFT_FAIL_TO_HARD   2
 static uint8_t s_soft_fail = 0;      /* 软路径连续失败次数 */
@@ -864,90 +784,12 @@ void RE_MQTT_Init(void)
 }
 
 // ==================== MQTT 心跳包 ====================
-/* 2026-11-19 修复"关掉热点仍显示在线"：
-   原来发的是裸 "AT\r\n" —— 只测得到"串口活着"，ESP 模块 WiFi/MQTT 全断了
-   它照样回 OK，于是心跳永远成功、g_mqtt_connected 永远不清零：
-   PA15 常亮、屏幕显示在线，板子根本不知道自己掉线（TCP 半开）。
+/* 心跳：只探测模块是否存活（裸 AT）。主动状态查询（CWJAP? / MQTTCONN?）会插进
+   模块的收发包之间打断链路，禁止在心跳里使用；断线由 +MQTTDISCONNECTED
+   和发布失败计数判定。 */
 
-   现在两级判据，任一为负即判离线：
-     ① AT+MQTTCONN? —— 固件内部 MQTT 状态机（官方定义）
-          0 未初始化 / 1 已设 USERCFG / 2 已设 CONNCFG / 3 已断开
-          4 已建立 / 5 已连未订阅 / 6 已连已订阅（我们订阅过，在线为 6）
-     ② AT+CWJAP?   —— WiFi 关联状态
-          回 "No AP" = 热点已经没了。
-   为什么要 ②：热点一关，TCP 常进入半开状态，ESP 的 MQTT 状态机要等
-   keepalive 超时（可达一到两分钟）才转 3，这段时间 ① 仍报"已连接"；
-   而 WiFi 层几乎立刻就知道链路断了 —— ② 才是最快、最硬的信号。
-
-   兼容性兜底：若查询命令本身不被老固件支持（返回 ERROR/超时），
-   退回裸 AT，保持原来"6 次连续失败才断线"的保守语义，绝不因查不到就误判。 */
 ESP_Status_t MQTT_SendPing(void)
 {
-    /* 2026-11-19 二次回退：心跳只做"模块是否还活着"这一件事。
-       中间试过每 10 秒发 AT+CWJAP? / AT+MQTTCONN? 主动查状态，
-       实测刚连上几秒就掉线、且再也回不来 —— 这些查询会插进模块正在
-       处理的 MQTT 收发包中间，把链路自己弄断，得不偿失。
-
-       断线检测改为纯被动、不碰数据通道的两条路：
-         ① +MQTTDISCONNECTED 主动上报（ESP_SendCmd 里已解析，立刻置 0）
-         ② 业务发布连续失败次数（AT 任务里判，约 30 秒确认）
-       热点关闭时，发布必然连续失败，30 秒内能识别；
-       而正常的 MQTT 流量不会被任何查询命令打扰。 */
+    
     return ESP_SendCmd_OK("AT\r\n", 1000);
 }
-
-/**
- * @brief  透传模式下从 ESP8266 接收原始 TCP 数据
- * @param  sock       未使用（保留参数，兼容之前的接口设计）
- * @param  buf        接收缓冲区指针
- * @param  len        期望接收的字节数
- * @param  timeout_ms 超时时间（毫秒）
- * @return 实际接收到的字节数，超时或失败返回 -1
- */
-
-
-/* MQTT 数据流中可能夹着 SUBACK 或平台下发消息；不能假定前两个字节就是 PINGRESP。 */
-
-// 在 mqtt.c 中新增
-//void MQTT_SendTempHumi_NoWait(float temp, float humi,float light)
-//{
-//    char payload[128];
-//    sprintf(payload, "{\"temperature\":%.1f,\"shidu\":%.1f,\"light\":%.0f}", temp, humi,light);
-
-//    uint8_t buf[128];
-//    int pos = 0;
-//    buf[pos++] = 0x32;		//固定报头 报文类型
-
-//		/*可变报头 主题长度：2 主题名称：5 报文标识符：2 有效载荷：*/
-//    uint16_t topic_len = 5;
-//    uint16_t msg_len = strlen(payload);
-//    uint16_t rem = 2 + topic_len + 2 + msg_len;
-
-//		/*变长编码计算剩余长度 小端排序（低位数据放在低地址） 低位在前  (一般低地址在前)*/
-//    do {
-//        uint8_t b = rem % 128;
-//        rem /= 128;
-//        if (rem > 0) b |= 0x80;
-//        buf[pos++] = b;
-//    } while (rem > 0);
-
-//		/*可变报头  主题长度 0x00 0x05两个字节 高位在前*/
-//    buf[pos++] = 0;
-//    buf[pos++] = topic_len;
-//    memcpy(&buf[pos], "stm32", 5);
-//    pos += 5;
-
-//		/*报文标识符 0x00 0x01*/
-//    buf[pos++] = 0;
-//    buf[pos++] = 1;
-
-//		/*有效载荷*/
-//    memcpy(&buf[pos], payload, msg_len);
-//    pos += msg_len;
-
-//    HAL_UART_Transmit(&huart1, buf, pos, 5000);
-//    vTaskDelay(100);
-//    // 不等待 PUBACK，直接返回
-//}
-
-

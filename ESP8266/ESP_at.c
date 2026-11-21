@@ -198,11 +198,8 @@ ESP_Status_t ESP_SendCmd(const char *cmd, const char *expected_ack, uint32_t tim
                         g_mqtt_conn_state = atoi(p + 1);
                 }
 
-                /* AT+CWJAP? 的回包：
-                     已连接 → +CWJAP:"ssid","bssid",ch,rssi
-                     未连接 → No AP
-                   注意不能只看 expected_ack="OK"：两种情况固件都会回 OK，
-                   必须靠这两行区分。这是热点关闭后最快能拿到的断线证据。 */
+                /* AT+CWJAP? 回包：+CWJAP 表示已关联，No AP 表示未连接（须从行首匹配，
+   SSID 里可能含同样字样）。 */
                 if (strstr(line, "+CWJAP:") != NULL) {
                     g_wifi_joined = 1;
                 } else if (strncmp(line, "No AP", 5) == 0) {
@@ -227,12 +224,7 @@ ESP_Status_t ESP_SendCmd(const char *cmd, const char *expected_ack, uint32_t tim
                     }
                 }
 
-                /* 先判错误，再判期望应答：避免同一行两者都含时误返回成功。
-                   固件有三种"失败但不说 ERROR"的形式，必须都认，否则会被当成
-                   普通文本忽略、白等到超时，而且命令其实根本没被执行：
-                     ① "ERR CODE:0x0000600C"  （MQTT 错误码，见官方 AT_MQTT_* 表）
-                     ② "busy p..."            （上一条命令未处理完，固件直接拒绝）
-                     ③ "ERROR"                （老式通用错误） */
+                /* 先判错误再判成功：同一行同时含两者时不能误返回成功。 */
                 if (strstr(line, "ERROR") != NULL ||
                     strstr(line, "ERR CODE:") != NULL ||
                     strstr(line, "+MQTTPUB:FAIL") != NULL ||
@@ -284,14 +276,8 @@ void ESP_UrcSniff(void)
 }
 
 
-/* MQTT 发布专用：两段式应答都等
-   实测固件（ESP-AT v2.2.0）对 AT+MQTTPUB 的回包是：
-       AT+MQTTPUB=0,"STM32F411","{...}",1,0
-       OK                  ← 命令被接受
-       +MQTTPUB:OK         ← 真正投递成功
-   失败时第二段是 +MQTTPUB:FAIL。
-   ESP_SendCmd 一看到第一段 OK 就返回成功，于是 FAIL 永远不会被看见 ——
-   本次问题的"云端一条都收不到但软件认为发送成功"就是这么来的。 */
+/* MQTT 发布：AT+MQTTPUB 的应答分两段（OK 表示命令被接受，+MQTTPUB:OK 才是投递成功）。
+   只等前一段会把失败当成成功，故两段都判。 */
 ESP_Status_t ESP_MQTTPub(const char *cmd, uint32_t timeout_ms)
 {
     g_pub_stage = 0;                 /* 取证：每轮发布重新记录 */
@@ -357,14 +343,8 @@ pub_done:
 }
 
 
-/* MQTT 原始字节发布（AT+MQTTPUBRAW）—— 详见 ESP_at.h 的函数注释。
-   流程严格照官方文档：
-       AT+MQTTPUBRAW=0,"topic",<len>,0,0
-       OK
-       >                      ← 提示可以送数据了
-       <len 个原始字节>
-       +MQTTPUB:OK / +MQTTPUB:FAIL
-   三个阶段的超时都要有，缺任何一个都会在出错时把任务永久挂住。 */
+/* 原始字节发布：AT+MQTTPUBRAW → OK → '>' → 数据 → +MQTTPUB:OK/FAIL。
+   payload 原样发送，无需转义，也不受单条命令 256 字节限制。 */
 ESP_Status_t ESP_MQTTPubRaw(const char *topic, const uint8_t *data, uint16_t len, uint32_t timeout_ms)
 {
     char cmd[96];

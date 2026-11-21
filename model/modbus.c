@@ -100,11 +100,7 @@ static const uint8_t auchCRCLo[] = {
 
 
 /****************************************************手敲*************************************************************/
-/*CRC16校验*/
-
-/*
-一般情况 低地址在前 小端排序（低位字节在低地址）低字节在前  大端排序 高字节在前
-*/
+/* CRC16/MODBUS，多项式 0xA001，低字节在前 */
 uint16_t CRC_16_MODBUS(uint8_t *data,uint8_t len,uint8_t flag)
 {
 	if(flag)
@@ -599,75 +595,3 @@ void MQTT_SendAllDev_NoWait(void)
     vTaskDelay(10);
 }
 
-/*																	USART2
-手动轮询RXNE：不依赖HAL库的阻塞接收或中断接收，零延迟读取每个字节。
-
-双重超时保护：50ms帧间隔（Modbus标准3.5字符/4ms）和800ms绝对超时，保证不卡死。
-
-vTaskDelay(1)：在FreeRTOS下主动让出CPU，保证UI和MQTT任务不被饿死。
-
-没有开启串口中断接收 检查状态寄存器 有数据就读DR 读完后状态会变为0
-*/
-int Modbus_Get_Temp(float *temp,float *shi)
-{
-	uint8_t tx[8];
-	uint8_t rx[20];
-	uint8_t count=0;
-	uint16_t crc=0;
-	
-	/*问询帧*/
-	tx[0]=0x01;
-	tx[1]=0x03;
-	tx[2]=0x00;
-	tx[3]=0x01;
-	tx[4]=0x00;
-	tx[5]=0x02;
-	
-	/*小端排序 低字节在前 （低字节在低地址 ，低地址默认在前）*/
-	crc=CRC_16_MODBUS(tx,6,0);
-	tx[6]=crc &0xff;
-	tx[7]=(crc>>8)&0xff;
-	
-	memset(rx,0,sizeof(rx));
-	RS485_TX;
-	HAL_UART_Transmit(&huart2,tx,sizeof(tx),1000);			//发送问询帧
-	vTaskDelay(1);
-	
-	RS485_RX;				//切换为接收模式
-	
-	uint32_t start_time=HAL_GetTick();
-	uint32_t up_time=HAL_GetTick();
-	
-	while(1)
-	{
-		if(__HAL_UART_GET_FLAG(&huart2,UART_FLAG_RXNE))
-		{
-			uint8_t ch=huart2.Instance->DR &0xff;		//DR寄存器有数据时 状态寄存器为1  读取DR寄存器的值 状态清零
-			if(count<sizeof(rx))
-			{
-				rx[count++]=ch;
-				up_time=HAL_GetTick();
-			}
-		}
-		if(count>0 && (HAL_GetTick()-up_time)>50)					//帧与帧间隔3.5个字符 4ms
-		{
-			break;
-		}
-		if(HAL_GetTick()-start_time>800)										//绝对超时 不卡死
-		{
-			break;
-		}
-		vTaskDelay(1);						//释放CPU防止其他任务饿死
-	}
-	
-	uint16_t crc_re=CRC_16_MODBUS(rx,count-2,1);
-	if(count==9 && rx[0]==0x01 && rx[1]==0x03 && rx[2]==0x04 && rx[7]==(crc_re& 0xff) && rx[8]==((crc_re>>8)& 0xff))
-	{
-		uint16_t t=(rx[3]<<8)|rx[4];
-		uint16_t s=(rx[5]<<8)|rx[6];
-		*temp=t/10.0;
-		*shi=s/10.0;
-		return 1;
-	}
-	return 0;
-}

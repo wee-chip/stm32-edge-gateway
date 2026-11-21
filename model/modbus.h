@@ -13,7 +13,6 @@ extern volatile uint8_t g_rs485_invert;   /* 0=EN高发送(标准) 1=EN低发送
 */
 
 
-int Modbus_Get_Temp(float *temp,float *shi);
 
 uint16_t CRC_16_MODBUS(uint8_t *data,uint8_t len,uint8_t flag);
 

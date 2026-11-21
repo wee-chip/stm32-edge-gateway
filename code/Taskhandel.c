@@ -79,18 +79,6 @@ volatile uint8_t g_task_fail = 0;
 // ==============================================
 // Modbus 采集
 // ==============================================
-//void Modbus(void)
-//{
-//    Data_t data;				//结构体变量
-
-//    while(1)
-//    {
-//        Modbus_Get_Temp(&data.temp, &data.shi);		//采集温湿度            
-//				xQueueOverwrite(data_queue, &data);					// 永远只保留最新一次采集结果，旧值被直接覆盖 该队列长度为1
-//        vTaskDelay(500);
-//    }
-//}
-
 void Modbus(void *argument)
 {
     (void)argument;	/* FreeRTOS 传入参数本任务不用 */
@@ -120,12 +108,9 @@ void Modbus(void *argument)
 
 从数组里获取数据保证数据是最新的 
 */
-/* ================= 云端按需拉取历史（2026-11-21，第三层）=================
-   流程：MQTTX 往订阅主题发 {"cmd":"history","n":20}
-        → ESP8266 吐 +MQTTSUBRECV → ESP_UrcPoll() 收进 g_cmd_payload
-        → 这里解析，按 CACHE_HIST_PAGE 条一页回传。
-   为什么放在"发布窗口"里发：实时数据永远先发、按 6 秒节奏不变；
-   历史页只吃这个窗口剩余的空隙，不占用实时的发送时隙。 */
+/* 云端按需拉取历史：MQTTX 下发 {"cmd":"history","n":N}，
+   设备按 CACHE_HIST_PAGE 条一页从历史记录区回传。
+   历史页只在实时数据发完后的同一窗口发送，不抢占实时时隙。 */
 static uint8_t  s_hist_active = 0;
 static uint16_t s_hist_skip   = 0;    /* 已跳过最新多少条（翻页用） */
 static uint16_t s_hist_total  = 0;    /* 本次要发多少条 */
@@ -242,10 +227,7 @@ void MQTT(void *argument)
 				 
 		//	xSemaphoreTake(uart1_mutex, portMAX_DELAY);				//获取锁
 			
-			/* 原来这里是 portMAX_DELAY：队列里没有新数据就永远醒不来，
-			   PA15 也就永远不更新 —— 一旦 Modbus 那边没喂队列，在线灯就一动不动，
-			   看着像"没连上"，其实可能连接好好的。这是上一轮 PA15 误判的同一类问题。
-			   现在改成 1 秒超时：有数据就发，没数据也要每秒刷新一次在线灯。 */
+			/* 队列接收带 1 秒超时：没有新数据也要醒来刷新在线灯。 */
 			BaseType_t got_data = xQueueReceive(data_queue, &data_q, pdMS_TO_TICKS(1000));
 
             /* PA15 = 「MQTT 在线」指示灯（SET=亮，RESET=灭）。
@@ -277,16 +259,8 @@ void MQTT(void *argument)
 
             if (g_mqtt_connected)			//在线
             {
-/* ===== 断网补传（2026-11-21 重新启用）=====
-   原实现有三个问题，所以一直关着：
-     ① 每轮采集（约 1.6 秒）就补 5 条，实际约 190 条/分钟，
-        直接撑爆巴法云免费版的推送频率，云端会静默丢包；
-     ② 发布失败也照样 FlashCache_MarkSent()，数据被标成"已发送"永久丢失；
-     ③ 补完调 my_clear() 把读指针拉回起点，绕过了擦除逻辑。
-   现在改为：补传与实时【交替】，每个 6 秒发布窗口只用一次 ——
-   要么补一条旧数据，要么发一条实时数据。总速率始终 10 条/分钟，不会超限；
-   失败不标记，下一轮重试。代价是补传速度约 6 秒/条（≈500 条/小时），
-   覆盖普通断网时长足够。 */
+/* 断网补传：每个 6 秒窗口只发一条，补传与实时交替，总速率恒定 10 条/分钟。
+   PeekBatch 只读不消耗，发布成功后才 Commit，失败下一轮重试。 */
 static uint32_t last_pub_tick = 0;
 {
     uint32_t now_tick = HAL_GetTick();
@@ -476,15 +450,8 @@ void AT(void *argument)
                 }
             }
 
-            /* ===== 断线判定（2026-11-19 最终版，纯被动、不干扰数据通道）=====
-               心跳发的是裸 AT，只证明串口活着——模块断网后它照样回 OK，
-               所以"心跳成功"不等于"链路通"。真正能反映链路的是业务发布：
-                 连续 5 次投递失败（6 秒/次 ≈ 30 秒）→ 云端一条都收不到 → 判离线。
-               为什么不主动查 AT+CWJAP?/AT+MQTTCONN?：
-               实测这类查询会插进模块正在处理的 MQTT 收发包中间，把本来好的
-               连接自己弄断（连上几秒就掉、还回不来）。宁可慢 30 秒，也不能
-               为了检测断线而把在线弄断。
-               另外 +MQTTDISCONNECTED 主动上报仍会在 ESP_at.c 里立刻置 0。 */
+            /* 断线判定：纯被动，不主动查询（查询会打断数据通道）。
+   连续 5 次发布失败（约 30 秒）判离线；+MQTTDISCONNECTED 另行立即置零。 */
             if (g_pub_fail_cnt >= 5)
             {
                 heart_fail = 6;
@@ -511,17 +478,7 @@ void AT(void *argument)
 				}
         xSemaphoreGive(uart1_mutex);					//释放锁
 
-        /* ===== 运行期遥测：每 60 秒上报一次内部状态 =====
-           （原来 30 秒一条；巴法云免费版有推送频率限制，把配额尽量让给业务数据，
-             遥测够用就行——它的作用是"板子还活着、卡在哪一步"，不需要高频。）
-           屏幕已经坏了，这条 probe 是唯一能"看见"板子内部状态的通道
-           —— 开机那条 probe 走的就是同一条链路，已被实测证明能到达巴法云。
-           有了 u/p/l 三个计数就能定位卡点：
-             u 不涨        → MQTT 任务没走到发布分支（标志为 0 或队列空）
-             u 涨、p 涨    → 走到了发布，但 AT+MQTTPUB 被固件拒（busy p / ERR CODE）
-             u 涨、p 不涨  → 发布成功却看不到 → 问题在 broker 侧（主题/互踢/限流）
-             l 涨          → 卡在串口锁上，两个任务在互相抢
-           单独开一段持锁窗口，避免把心跳的持锁时间从 2 秒拉长到 7 秒。 */
+        /* 运行期遥测：每 60 秒上报一次发送侧计数，用于远端定位卡点。 */
         if (g_mqtt_connected && ++tele_div >= 6)
         {
             tele_div = 0;
@@ -544,14 +501,7 @@ void UI(void *argument)
     (void)argument;	/* FreeRTOS 传入参数本任务不用 */
     Data_t disp_data;
 
-    /* 2026-11-19 停用：开机擦日志会连续占用 CPU 数秒（最坏 12.8 秒），
-       UI 任务优先级高于 AT/MQTT，擦除期间网络任务被饿死，
-       表现为"刚连上几秒就掉线 + WiFi rejoin failed"。
-       历史日志暂不清理（只影响日志页观感，不影响功能）；
-       要清日志请改在日志页手动触发，不要在开机路径里做。
-       函数本身保留：Log_EraseRecent()。
-    Log_EraseRecent();
-    */
+    /* 开机擦日志已停用：擦除期间会长时间占用 CPU，饿死网络任务。 */
 
     LCD_Init();
     TP_Init();
