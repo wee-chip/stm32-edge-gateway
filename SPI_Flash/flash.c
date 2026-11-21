@@ -437,6 +437,29 @@ void Hist_Write(uint32_t epoch, float temp, float humi, float light)
     if (flash_mutex) xSemaphoreGive(flash_mutex);
 }
 
+/* epoch -> "YYYY-MM-DD HH:MM:SS"。历史记录存的是定长 epoch，回传时转成可读时间，
+   云端不需要再做换算。算法为 civil_from_days（与 RTC_GetEpoch 互逆）。 */
+static void Hist_FmtTime(uint32_t epoch, char *buf)
+{
+    uint32_t days = epoch / 86400u;
+    uint32_t secs = epoch % 86400u;
+    int z, era, doe, yoe, y, doy, mp, d, m;
+
+    z   = (int)days + 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y   = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp  = (5 * doy + 2) / 153;
+    d   = doy - (153 * mp + 2) / 5 + 1;
+    m   = mp + (mp < 10 ? 3 : -9);
+    y  += (m <= 2);
+
+    snprintf(buf, 24, "%04d-%02d-%02d %02u:%02u:%02u", y, m, d,
+             (unsigned)(secs / 3600u), (unsigned)(secs % 3600u / 60u), (unsigned)(secs % 60u));
+}
+
 int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, uint8_t *got)
 {
     uint32_t addr_list[16];
@@ -481,19 +504,20 @@ int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, 
     /* addr_list 是新->旧，输出旧->新 */
     for (i = n; i > 0; i--)
     {
+        char ts[24];
         int ti, tf, hi, hf;
 
         SPI_FLASH_BufferRead((uint8_t *)&r, addr_list[i - 1], HIST_REC_SIZE);
-        if ((uint32_t)pos + 48U >= out_size)
+        if ((uint32_t)pos + 64U >= out_size)
             break;
 
         ti = r.temp10 / 10;  tf = r.temp10 % 10;  if (tf < 0) tf = -tf;
         hi = r.humi10 / 10;  hf = r.humi10 % 10;
+        Hist_FmtTime(r.epoch, ts);
 
-        pos += (uint16_t)snprintf(out + pos, out_size - pos, "%s[%lu,%d.%d,%d.%d,%u]",
+        pos += (uint16_t)snprintf(out + pos, out_size - pos, "%s[\"%s\",%d.%d,%d.%d,%u]",
                                   first ? "" : ",",
-                                  (unsigned long)r.epoch,
-                                  ti, tf, hi, hf, (unsigned)r.light);
+                                  ts, ti, tf, hi, hf, (unsigned)r.light);
         first = 0;
         (*got)++;
     }
