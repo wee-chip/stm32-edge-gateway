@@ -494,7 +494,9 @@ int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, 
         return -2;
     }
 
-    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"h\":[");
+    /* 每个条目单独一行、带字段名：MQTTX 里直接可读，不用再截断拼接去猜
+       哪几个数字是哪条。（ts 时间 / t 温度 / h 湿度 / l 光照） */
+    pos = (uint16_t)snprintf(out, out_size, "{\"off\":1,\"hist\":[\n");
     if (pos >= out_size)
     {
         if (flash_mutex) xSemaphoreGive(flash_mutex);
@@ -508,15 +510,16 @@ int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, 
         int ti, tf, hi, hf;
 
         SPI_FLASH_BufferRead((uint8_t *)&r, addr_list[i - 1], HIST_REC_SIZE);
-        if ((uint32_t)pos + 64U >= out_size)
+        if ((uint32_t)pos + 96U >= out_size)
             break;
 
         ti = r.temp10 / 10;  tf = r.temp10 % 10;  if (tf < 0) tf = -tf;
         hi = r.humi10 / 10;  hf = r.humi10 % 10;
         Hist_FmtTime(r.epoch, ts);
 
-        pos += (uint16_t)snprintf(out + pos, out_size - pos, "%s[\"%s\",%d.%d,%d.%d,%u]",
-                                  first ? "" : ",",
+        pos += (uint16_t)snprintf(out + pos, out_size - pos,
+                                  "%s  {\"ts\":\"%s\",\"t\":%d.%d,\"h\":%d.%d,\"l\":%u}",
+                                  first ? "" : ",\n",
                                   ts, ti, tf, hi, hf, (unsigned)r.light);
         first = 0;
         (*got)++;
@@ -528,6 +531,7 @@ int Hist_PeekPage(char *out, uint16_t out_size, uint16_t skip, uint8_t max_cnt, 
         return -2;
     }
 
+    out[pos++] = '\n';
     out[pos++] = ']';
     out[pos++] = '}';
     out[pos]   = '\0';

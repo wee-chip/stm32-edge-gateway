@@ -37,7 +37,7 @@
 
 /* 历史查询每页回传几条。6 条 × 约 85 字节 + 外壳 ≈ 530 字节，
    远低于 ESP-AT MQTTPUBRAW 的限制，也留足 UART 传输时间。 */
-#define CACHE_HIST_PAGE     10
+#define CACHE_HIST_PAGE     8
 
 /* ===== 历史记录区 =====
    每条 16 字节：魔数 + Unix 时间戳 + 温度×10 + 湿度×10 + 光照 + 保留
