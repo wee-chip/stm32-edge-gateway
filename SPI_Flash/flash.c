@@ -368,6 +368,9 @@ typedef struct
     uint16_t rsv;
 } HistRec_t;
 
+/* 编译期断言：结构体必须正好 16 字节，否则扇区擦除边界会错位 */
+typedef char _hist_rec_size_check[(sizeof(HistRec_t) == HIST_REC_SIZE) ? 1 : -1];
+
 static uint32_t hist_wr    = HIST_START_ADDR;
 static uint8_t  hist_ready = 0;
 

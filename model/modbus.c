@@ -36,7 +36,28 @@ volatile uint32_t g_ok_count   = 0;   // 读取成功次数
 volatile uint32_t g_fail_count = 0;   // 读取失败次数
 volatile uint32_t g_th_tick    = 0;   // 温湿度最近一次读取成功的时刻（算"数据有多旧"）
 volatile uint32_t g_tx_fail    = 0;   // 发送环节自身失败的次数（区分"没发出去"和"没人应"）
-volatile uint32_t g_light_raw  = 0;   // 光照两个寄存器的原始 32 位值（核对除数用）
+volatile uint32_t g_light_raw  = 0;
+
+/* 运行期阈值（可被 setth 指令覆盖） */
+static float s_alm_t_hi = ALM_TEMP_HIGH;
+static float s_alm_t_lo = ALM_TEMP_LOW;
+static float s_alm_h_hi = ALM_HUMI_HIGH;
+static float s_alm_h_lo = ALM_HUMI_LOW;
+
+void Modbus_SetAlarm(float t_hi, float t_lo, float h_hi, float h_lo)
+{
+    /* 只接受合理范围内的值，避免指令写坏阈值后永远告警 */
+    if (t_hi > -40.0f && t_hi < 125.0f && t_lo > -40.0f && t_lo < 125.0f && t_lo < t_hi)
+    {
+        s_alm_t_hi = t_hi;
+        s_alm_t_lo = t_lo;
+    }
+    if (h_hi > 0.0f && h_hi <= 100.0f && h_lo >= 0.0f && h_lo < 100.0f && h_lo < h_hi)
+    {
+        s_alm_h_hi = h_hi;
+        s_alm_h_lo = h_lo;
+    }
+}   // 光照两个寄存器的原始 32 位值（核对除数用）
  extern UART_HandleTypeDef huart2;
 
 static const uint8_t auchCRCHi[] = {
@@ -508,6 +529,7 @@ extern QueueHandle_t lvgl_data_queue;
 void MQTT_SendAllDev_NoWait(void)
 {
 		Data_t UIdat = {0};
+    uint8_t _th_fresh = 0;      /* 本轮温湿度是否为新鲜读数（err_cnt==0） */
 	
     /* 纯 JSON：不再手工把引号转义成 \"、也不再自己拼 AT 命令 ——
        转义与 AT 语法全部交给 pal.c 的 MQTT_Publish() 统一处理。 */
@@ -518,10 +540,10 @@ void MQTT_SendAllDev_NoWait(void)
         ModDev_t *pt=&dev_list[i];
         if(pt->func == 0x04 )
         {
-            //01温湿度：温度、湿度
             p += sprintf(payload+p,"\"temp\":%.1f,\"humi\":%.1f,",pt->val1,pt->val2);
 						UIdat.temp=pt->val1;
 						UIdat.shi=pt->val2;
+            if (pt->err_cnt == 0) _th_fresh = 1;   /* 本轮确实读到了，才允许告警判定 */
         }
         else if(pt->func == 0x03)
         {
@@ -545,13 +567,31 @@ void MQTT_SendAllDev_NoWait(void)
        age 归零   = 刚刚真正读到。
        inv = 485 当前方向极性（0 标准 / 1 反相），烧不同接法的模块时一眼能看出来。
        注意：th 的值必须带引号（合法 JSON 字符串），否则整条 JSON 解析失败被巴法云丢弃 */
-    /* 告警位：bit0 温度高 / bit1 温度低 / bit2 湿度高 / bit3 湿度低 */
+    /* 告警位：bit0 温度高 / bit1 温度低 / bit2 湿度高 / bit3 湿度低。
+       两个前提：
+         1) 只有本轮真正读到温湿度（_th_fresh）才判定 —— 否则用的是上一轮残值，
+            传感器掉线时会一直按旧值报警；
+         2) 带 1℃ / 5%RH 回差，避免读数在阈值附近抖动导致告警反复跳变。 */
     {
+        static uint8_t alm_prev = 0;
         uint8_t alm = 0;
-        if (UIdat.temp > ALM_TEMP_HIGH) alm |= 0x01;
-        if (UIdat.temp < ALM_TEMP_LOW)  alm |= 0x02;
-        if (UIdat.shi  > ALM_HUMI_HIGH) alm |= 0x04;
-        if (UIdat.shi  < ALM_HUMI_LOW)  alm |= 0x08;
+
+        if (_th_fresh)
+        {
+            if (alm_prev & 0x01) { if (UIdat.temp > s_alm_t_hi - ALM_HYST_T) alm |= 0x01; }
+            else                 { if (UIdat.temp > s_alm_t_hi)              alm |= 0x01; }
+
+            if (alm_prev & 0x02) { if (UIdat.temp < s_alm_t_lo + ALM_HYST_T) alm |= 0x02; }
+            else                 { if (UIdat.temp < s_alm_t_lo)              alm |= 0x02; }
+
+            if (alm_prev & 0x04) { if (UIdat.shi > s_alm_h_hi - ALM_HYST_H) alm |= 0x04; }
+            else                 { if (UIdat.shi > s_alm_h_hi)             alm |= 0x04; }
+
+            if (alm_prev & 0x08) { if (UIdat.shi < s_alm_h_lo + ALM_HYST_H) alm |= 0x08; }
+            else                 { if (UIdat.shi < s_alm_h_lo)             alm |= 0x08; }
+        }
+        alm_prev = alm;
+
         p += sprintf(payload + p, "\"alm\":%u,", (unsigned)alm);
     }
 

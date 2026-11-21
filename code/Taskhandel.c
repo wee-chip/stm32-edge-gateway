@@ -141,6 +141,24 @@ static void CloudCmd_Handle(void)
         return;
     }
 
+    /* 设置告警阈值：{"cmd":"setth","tmax":28,"tmin":18,"hmax":70,"hmin":40}
+       只覆盖出现的字段，未出现的沿用默认值。 */
+    if (strstr(g_cmd_payload, "setth") != NULL)
+    {
+        float tmax = ALM_TEMP_HIGH, tmin = ALM_TEMP_LOW;
+        float hmax = ALM_HUMI_HIGH, hmin = ALM_HUMI_LOW;
+        const char *q;
+
+        if ((q = strstr(g_cmd_payload, "\"tmax\"")) != NULL && strchr(q, ':')) tmax = (float)atof(strchr(q, ':') + 1);
+        if ((q = strstr(g_cmd_payload, "\"tmin\"")) != NULL && strchr(q, ':')) tmin = (float)atof(strchr(q, ':') + 1);
+        if ((q = strstr(g_cmd_payload, "\"hmax\"")) != NULL && strchr(q, ':')) hmax = (float)atof(strchr(q, ':') + 1);
+        if ((q = strstr(g_cmd_payload, "\"hmin\"")) != NULL && strchr(q, ':')) hmin = (float)atof(strchr(q, ':') + 1);
+
+        Modbus_SetAlarm(tmax, tmin, hmax, hmin);
+        Log_Write(LOG_INFO, "setth ok");
+        return;
+    }
+
     if (strstr(g_cmd_payload, "history") == NULL)
         return;
 

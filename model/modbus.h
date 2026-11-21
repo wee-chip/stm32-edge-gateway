@@ -34,12 +34,22 @@ typedef struct
 }ModDev_t;
 
 /* ===== 阈值告警 =====
-   温度/湿度越界时在实时报文里置 alm 位，云端据此告警。
-   位定义：bit0 温度过高 / bit1 温度过低 / bit2 湿度过高 / bit3 湿度过低 */
+   位定义：bit0 温度过高 / bit1 温度过低 / bit2 湿度过高 / bit3 湿度过低
+
+   默认区间取工业车间/机房通用值：温度 10~35℃、湿度 20~85%RH。
+   参考：GB/T 50174-2017 机房 A 级为 18~27℃ / 35%~75%；
+         IEC 60721-3-3 3K3 类为 5~40℃ / 5%~85%（无凝露）。
+   运行期可用指令覆盖：{"cmd":"setth","tmax":28,"tmin":18,"hmax":70,"hmin":40} */
 #define ALM_TEMP_HIGH   35.0f
-#define ALM_TEMP_LOW     5.0f
-#define ALM_HUMI_HIGH   80.0f
+#define ALM_TEMP_LOW    10.0f
+#define ALM_HUMI_HIGH   85.0f
 #define ALM_HUMI_LOW    20.0f
+
+/* 回差：越限置位后，需回到阈值内 1℃ / 5%RH 才清除，避免在阈值附近抖动 */
+#define ALM_HYST_T       1.0f
+#define ALM_HYST_H       5.0f
+
+void Modbus_SetAlarm(float t_hi, float t_lo, float h_hi, float h_lo);
 
 extern ModDev_t dev_list[];
 extern uint8_t dev_cnt;
